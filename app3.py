@@ -216,9 +216,9 @@ def obtener_detalles_orden_falabella(order_id):
     order['Items'] = items
     return order
 
-# Función mejorada con logging detallado, retry y timeout alto
+# Función corregida: usa /variants.json?code={code}, maneja items como list o dict con keys numéricos
 def obtener_variant_bsale_por_code(code):
-    url = f"{BSALE_BASE_URL}/products.json?code={code}"
+    url = f"{BSALE_BASE_URL}/variants.json?code={code}"
     max_retries = 2
     for attempt in range(max_retries + 1):
         try:
@@ -232,7 +232,7 @@ def obtener_variant_bsale_por_code(code):
                 url, 
                 headers=headers_bsale, 
                 timeout=60,  # Aumentado por latencia en cloud
-                verify=False  # Temporal: deshabilita SSL verify para test (quita en prod si no es necesario)
+                verify=True  # Activa verify para seguridad
             )
             
             log(f"Status code: {response.status_code}")
@@ -241,19 +241,22 @@ def obtener_variant_bsale_por_code(code):
             response.raise_for_status()
             data = response.json()
             log(f"Data keys: {list(data.keys()) if data else 'None'}")
-            log(f"Items count: {len(data.get('items', [])) if data else 0}")
             
-            if data and 'items' in data and data['items']:
-                product = data['items'][0]
-                if 'variants' in product and product['variants']:
-                    variant = product['variants'][0]  # Toma la primera variante
-                    log(f" ✓ Variante encontrada para {code}: ID {variant.get('id')}")
-                    return variant
-                else:
-                    log(f" ✗ Producto encontrado pero sin variants para {code}")
-                    return None
+            items = data.get('items', [])
+            if isinstance(items, dict):
+                # Asume keys numéricas como '0', '1', etc.
+                sorted_keys = sorted(items.keys(), key=lambda k: int(k) if k.isdigit() else float('inf'))
+                items = [items[key] for key in sorted_keys if key in items]
+                log(f"Converted items from dict to sorted list (len: {len(items)})")
+            
+            log(f"Items count: {len(items)}")
+            
+            if items:
+                variant = items[0]  # Toma el primero
+                log(f" ✓ Variante encontrada para {code}: ID {variant.get('id')}")
+                return variant
             else:
-                log(f" ✗ No se encontró producto para {code} (items vacíos)")
+                log(f" ✗ No se encontró variante para {code} (items vacíos)")
                 return None
                 
         except requests.exceptions.RequestException as req_e:
@@ -1017,3 +1020,4 @@ def index():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
+
