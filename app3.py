@@ -12,20 +12,21 @@ import time
 from threading import Thread
 import uuid
 from functools import wraps
+import os  # Agregado para env vars
 
 app = Flask(__name__)
-app.secret_key = 'tu_clave_secreta_aqui_cambia_por_una_segura'  # Cambia esto por una clave segura en producción
+app.secret_key = os.environ.get('SECRET_KEY', 'tu_clave_secreta_aqui_cambia_por_una_segura')  # Usa env var en prod
 
-# Configuración con tus credenciales (mismas que en el código original)
-BSALE_ACCESS_TOKEN = 'c08427dba8f06cbf22608864eac6f2a0ad0a3f5a'
+# Configuración con tus credenciales (usa env vars para seguridad en Render)
+BSALE_ACCESS_TOKEN = os.environ.get('BSALE_ACCESS_TOKEN', 'c08427dba8f06cbf22608864eac6f2a0ad0a3f5a')
 BSALE_BASE_URL = 'https://api.bsale.io/v1'
-FALABELLA_USER_ID = 'rodolfo@grupoescocia.cl'
-FALABELLA_API_KEY = '1b823c0738471081d0337a9cb42d86215d1c5f6f'
+FALABELLA_USER_ID = os.environ.get('FALABELLA_USER_ID', 'rodolfo@grupoescocia.cl')
+FALABELLA_API_KEY = os.environ.get('FALABELLA_API_KEY', '1b823c0738471081d0337a9cb42d86215d1c5f6f')
 FALABELLA_BASE_URL = 'https://sellercenter-api.falabella.com'
 OFFICE_ID = 1
 PRICE_LIST_ID = 2
-WALMART_CLIENT_ID = '1e115056-e49a-4935-a188-9701d55bfbda'
-WALMART_CLIENT_SECRET = 'ALCQs6lhu8PAMw5pKw0yXr3Z5lZs4QQ0TFeW3oe_KdSQVukmSVC7RmkORKHVScW2fM0HsgojXzspAP9dsJTpQbY'
+WALMART_CLIENT_ID = os.environ.get('WALMART_CLIENT_ID', '1e115056-e49a-4935-a188-9701d55bfbda')
+WALMART_CLIENT_SECRET = os.environ.get('WALMART_CLIENT_SECRET', 'ALCQs6lhu8PAMw5pKw0yXr3Z5lZs4QQ0TFeW3oe_KdSQVukmSVC7RmkORKHVScW2fM0HsgojXzspAP9dsJTpQbY')
 WALMART_PARTNER_ID = '10001403176'
 WALMART_TOKEN_URL = 'https://marketplace.walmartapis.com/v3/token'
 WALMART_ITEMS_URL = 'https://marketplace.walmartapis.com/v3/items'
@@ -215,25 +216,67 @@ def obtener_detalles_orden_falabella(order_id):
     order['Items'] = items
     return order
 
-# Función faltante: obtener_variant_bsale_por_code
+# Función mejorada con logging detallado, retry y timeout alto
 def obtener_variant_bsale_por_code(code):
     url = f"{BSALE_BASE_URL}/products.json?code={code}"
-    try:
-        log(f"Buscando variante en BSale para code {code}")
-        response = requests.get(url, headers=headers_bsale, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        if data and 'items' in data and data['items']:
-            product = data['items'][0]
-            if 'variants' in product and product['variants']:
-                variant = product['variants'][0]  # Toma la primera variante
-                log(f" ✓ Variante encontrada para {code}: ID {variant.get('id')}")
-                return variant
-        log(f" ✗ No se encontró variante para {code}")
-        return None
-    except Exception as e:
-        log(f"Error obteniendo variante para {code}: {e}")
-        return None
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            log(f"Buscando variante en BSale para code {code} (intento {attempt + 1}/{max_retries + 1})")
+            log(f"URL: {url}")
+            log(f"Headers: { {k: v if k != 'access_token' else '***HIDDEN***' for k,v in headers_bsale.items() } }")  # Oculta token
+            
+            # Usa session para reutilizar conexión (mejora estabilidad)
+            session_req = requests.Session()
+            response = session_req.get(
+                url, 
+                headers=headers_bsale, 
+                timeout=60,  # Aumentado por latencia en cloud
+                verify=False  # Temporal: deshabilita SSL verify para test (quita en prod si no es necesario)
+            )
+            
+            log(f"Status code: {response.status_code}")
+            log(f"Response headers: {dict(response.headers)}")  # Para debug red
+            
+            response.raise_for_status()
+            data = response.json()
+            log(f"Data keys: {list(data.keys()) if data else 'None'}")
+            log(f"Items count: {len(data.get('items', [])) if data else 0}")
+            
+            if data and 'items' in data and data['items']:
+                product = data['items'][0]
+                if 'variants' in product and product['variants']:
+                    variant = product['variants'][0]  # Toma la primera variante
+                    log(f" ✓ Variante encontrada para {code}: ID {variant.get('id')}")
+                    return variant
+                else:
+                    log(f" ✗ Producto encontrado pero sin variants para {code}")
+                    return None
+            else:
+                log(f" ✗ No se encontró producto para {code} (items vacíos)")
+                return None
+                
+        except requests.exceptions.RequestException as req_e:
+            log(f"Request error para {code} (intento {attempt + 1}): {type(req_e).__name__}: {req_e}")
+            if hasattr(req_e, 'response') and req_e.response is not None:
+                log(f"Response status en error: {req_e.response.status_code}")
+                log(f"Response text en error: {req_e.response.text[:200]}")
+            if attempt < max_retries:
+                log(f" Reintentando en 2s...")
+                time.sleep(2)
+                continue
+            else:
+                log(f" ✗ Falló después de {max_retries + 1} intentos")
+                return None
+                
+        except Exception as e:
+            log(f"Unexpected error para {code} (intento {attempt + 1}): {type(e).__name__}: {e}")
+            if attempt < max_retries:
+                time.sleep(2)
+                continue
+            return None
+    
+    return None
 
 def obtener_pdf_url_bsale(doc_id):
     log(f"Iniciando obtención de PDF para doc_id {doc_id}")
@@ -972,4 +1015,5 @@ def index():
     return html_content
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)
